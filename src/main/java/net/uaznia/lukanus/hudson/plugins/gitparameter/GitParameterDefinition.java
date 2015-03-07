@@ -14,6 +14,7 @@ import hudson.plugins.git.GitSCM;
 import hudson.plugins.git.GitTool;
 import hudson.plugins.git.IGitAPI;
 import hudson.plugins.git.Revision;
+import hudson.remoting.Future;
 import hudson.remoting.VirtualChannel;
 import hudson.scm.SCM;
 import hudson.util.StreamTaskListener;
@@ -21,11 +22,11 @@ import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 import org.apache.commons.lang.StringUtils;
@@ -59,9 +60,6 @@ public class GitParameterDefinition extends ParameterDefinition implements
     private String errorMessage;
     private String defaultValue;
 
-    private Map<String, String> revisionMap;
-    private Map<String, String> tagMap;
-    
     public boolean hasError = false;
 
     @DataBoundConstructor
@@ -183,8 +181,8 @@ public class GitParameterDefinition extends ParameterDefinition implements
 
         return -1;
     }
-    
-    private String getGitExe(){
+
+    private String getGitExe() {
         String defaultGitExe = File.separatorChar != '/' ? "git.exe" : "git";
 
         hudson.plugins.git.GitTool.DescriptorImpl descriptor = (hudson.plugins.git.GitTool.DescriptorImpl) Hudson.getInstance().getDescriptor(GitTool.class);
@@ -198,10 +196,11 @@ public class GitParameterDefinition extends ParameterDefinition implements
         }
         return defaultGitExe;
     }
-    
 
-    public void generateContents(String contenttype) throws IOException, InterruptedException {
+    public Map<String, String> generateContents(String contenttype) throws IOException, InterruptedException, ExecutionException {
         
+        Map<String, String> revTagMap = new LinkedHashMap<String, String>();
+
         hasError = false;
 
         final AbstractProject<?, ?> project = getParentProject();
@@ -209,32 +208,36 @@ public class GitParameterDefinition extends ParameterDefinition implements
         if (project.getSomeBuildWithWorkspace() == null) {
             this.errorMessage = "No workspace yet!. Perform at least one build to create workspace.";
             hasError = true;
-            return;
-        } 
+            revTagMap.put(errorMessage, errorMessage);
+            return revTagMap;
+        }
 
         SCM scm = project.getScm();
 
         if (!(scm instanceof GitSCM)) {
             this.errorMessage = "No Git configured in this job.";
             hasError = true;
-            return;
-        } 
+            revTagMap.put(errorMessage, errorMessage);
+            return revTagMap;
+        }
 
         GitSCM git = (GitSCM) scm;
-        
+
         final String gitExe = getGitExe();
 
         for (final RemoteConfig repository : git.getRepositories()) {
 
             FilePath workingDirectory = project.getSomeBuildWithWorkspace().getWorkspace();
 
-            workingDirectory.act(new FilePath.FileCallable<Boolean>() {
+            Future<Map> future = workingDirectory.actAsync(new FilePath.FileCallable<Map>() {
                 private static final long serialVersionUID = 1L;
 
-                public Boolean invoke(File workspace,
+                public Map invoke(File workspace,
                         VirtualChannel channel) throws IOException {
 
                     IGitAPI newgit = new GitAPI(gitExe, new FilePath(workspace), new StreamTaskListener(System.out), new EnvVars());
+
+                    Map<String, String> revTagMap = new LinkedHashMap<String, String>();;
 
                     try {
                         newgit.fetch(repository);
@@ -244,7 +247,6 @@ public class GitParameterDefinition extends ParameterDefinition implements
                     }
 
                     if (type.equalsIgnoreCase(PARAMETER_TYPE_REVISION)) {
-                        revisionMap = new LinkedHashMap<String, String>();
 
                         List<ObjectId> oid;
 
@@ -287,39 +289,33 @@ public class GitParameterDefinition extends ParameterDefinition implements
                             } catch (Exception e) {
                                 e.toString();
                             }
-                            revisionMap.put(r.getSha1String(), r.getSha1String() + " " + authorInfo + " " + goodDate);
+                            revTagMap.put(r.getSha1String(), r.getSha1String() + " " + authorInfo + " " + goodDate);
                         }
                     } else if (type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {
-                        tagMap = new HashMap<String, String>();
 
                         // Set<String> tagNameList = newgit.getTagNames("*");
                         for (String tagName : newgit.getTagNames("*")) {
-                            tagMap.put(tagName, tagName);
+                            revTagMap.put(tagName, tagName);
                         }
                     }
-                    return true;
+                    return revTagMap;
                 }
             });
+            revTagMap.putAll(future.get());
         }
+        return revTagMap;
     }
 
     public String getErrorMessage() {
         return errorMessage;
     }
 
-    public Map<String, String> getRevisionMap() throws IOException, InterruptedException {
-        //Fix get new commit's when new build is started  
-//		if (revisionMap == null || revisionMap.isEmpty()) {
-        generateContents(PARAMETER_TYPE_REVISION);
-//		}
-        return revisionMap;
+    public Map<String, String> getRevisionMap() throws IOException, InterruptedException, ExecutionException {
+        return generateContents(PARAMETER_TYPE_REVISION);
     }
 
-    public Map<String, String> getTagMap() throws IOException, InterruptedException {
-        if (tagMap == null || tagMap.isEmpty()) {
-            generateContents(PARAMETER_TYPE_TAG);
-        }
-        return tagMap;
+    public Map<String, String> getTagMap() throws IOException, InterruptedException, ExecutionException {
+        return generateContents(PARAMETER_TYPE_TAG);
     }
 
 }
