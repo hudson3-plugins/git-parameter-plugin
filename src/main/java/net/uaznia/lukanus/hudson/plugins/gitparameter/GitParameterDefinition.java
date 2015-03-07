@@ -2,21 +2,23 @@ package net.uaznia.lukanus.hudson.plugins.gitparameter;
 
 import hudson.EnvVars;
 import hudson.Extension;
-import hudson.model.ParameterValue;
-import hudson.model.TaskListener;
+import hudson.FilePath;
 import hudson.model.AbstractProject;
 import hudson.model.Hudson;
 import hudson.model.ParameterDefinition;
+import hudson.model.ParameterValue;
 import hudson.model.ParametersDefinitionProperty;
 import hudson.plugins.git.GitAPI;
 import hudson.plugins.git.GitException;
-import hudson.plugins.git.IGitAPI;
-import hudson.plugins.git.Revision;
 import hudson.plugins.git.GitSCM;
 import hudson.plugins.git.GitTool;
+import hudson.plugins.git.IGitAPI;
+import hudson.plugins.git.Revision;
+import hudson.remoting.VirtualChannel;
 import hudson.scm.SCM;
-
+import hudson.util.StreamTaskListener;
 import java.io.File;
+import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
@@ -24,10 +26,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-
 import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
-
 import org.apache.commons.lang.StringUtils;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.transport.RemoteConfig;
@@ -61,6 +61,8 @@ public class GitParameterDefinition extends ParameterDefinition implements
 
     private Map<String, String> revisionMap;
     private Map<String, String> tagMap;
+    
+    public boolean hasError = false;
 
     @DataBoundConstructor
     public GitParameterDefinition(String name, String type,
@@ -181,26 +183,8 @@ public class GitParameterDefinition extends ParameterDefinition implements
 
         return -1;
     }
-
-    public void generateContents(String contenttype) {
-
-        AbstractProject<?, ?> project = getParentProject();
-
-		// for (AbstractProject<?,?> project :
-        // Hudson.getInstance().getItems(AbstractProject.class)) {
-        if (project.getSomeWorkspace() == null) {
-            this.errorMessage = "noWorkspace";
-        }
-
-        SCM scm = project.getScm();
-
-        // if (scm instanceof GitSCM); else continue;
-        if (scm instanceof GitSCM) {
-            this.errorMessage = "notGit";
-        }
-
-        GitSCM git = (GitSCM) scm;
-
+    
+    private String getGitExe(){
         String defaultGitExe = File.separatorChar != '/' ? "git.exe" : "git";
 
         hudson.plugins.git.GitTool.DescriptorImpl descriptor = (hudson.plugins.git.GitTool.DescriptorImpl) Hudson.getInstance().getDescriptor(GitTool.class);
@@ -212,87 +196,110 @@ public class GitParameterDefinition extends ParameterDefinition implements
                 break;
             }
         }
+        return defaultGitExe;
+    }
+    
 
-        EnvVars environment = null;
+    public void generateContents(String contenttype) throws IOException, InterruptedException {
+        
+        hasError = false;
 
-        try {
-            environment = project.getSomeBuildWithWorkspace().getEnvironment(
-                    TaskListener.NULL);
-        } catch (Exception e) {
-        }
+        final AbstractProject<?, ?> project = getParentProject();
 
-        for (RemoteConfig repository : git.getRepositories()) {
-//			for (URIish remoteURL : repository.getURIs()) {
+        if (project.getSomeBuildWithWorkspace() == null) {
+            this.errorMessage = "No workspace yet!. Perform at least one build to create workspace.";
+            hasError = true;
+            return;
+        } 
 
-            IGitAPI newgit = new GitAPI(defaultGitExe, project.getSomeWorkspace(), TaskListener.NULL, environment);
-				// for later use
-            // if(this.branch != null && !this.branch.isEmpty()) {
-            // newgit.checkoutBranch(this.branch, null);
-            // }
+        SCM scm = project.getScm();
 
-            try {
-                newgit.fetch(repository);
-            } catch (GitException ge) {
-                // fetch fails when workspace is empty, run clone
-                newgit.clone(repository);
-            }
+        if (!(scm instanceof GitSCM)) {
+            this.errorMessage = "No Git configured in this job.";
+            hasError = true;
+            return;
+        } 
 
-            if (type.equalsIgnoreCase(PARAMETER_TYPE_REVISION)) {
-                revisionMap = new LinkedHashMap<String, String>();
+        GitSCM git = (GitSCM) scm;
+        
+        final String gitExe = getGitExe();
 
-                List<ObjectId> oid;
+        for (final RemoteConfig repository : git.getRepositories()) {
 
-                if (this.branch != null && !this.branch.isEmpty()) {
-                    oid = newgit.revListBranch(this.branch);
-                } else {
-                    oid = newgit.revListAll();
-                }
+            FilePath workingDirectory = project.getSomeBuildWithWorkspace().getWorkspace();
 
-                for (ObjectId noid : oid) {
-                    Revision r = new Revision(noid);
-                    List<String> details = newgit.showRevision(r);
+            workingDirectory.act(new FilePath.FileCallable<Boolean>() {
+                private static final long serialVersionUID = 1L;
 
-                    String author = "";
+                public Boolean invoke(File workspace,
+                        VirtualChannel channel) throws IOException {
 
-                    for (String detail : details) {
-                        if (detail.startsWith("author")) {
-                            author = detail;
-                            break;
-                        }
-                    }
+                    IGitAPI newgit = new GitAPI(gitExe, new FilePath(workspace), new StreamTaskListener(System.out), new EnvVars());
 
-                    String[] authorDate = author.split(">");
-                    String authorInfo = authorDate[0].replaceFirst("author ", "").replaceFirst("committer ", "") + ">";
-                    String goodDate = "";
                     try {
-                        String totmp = authorDate[1].trim();
-                        if (totmp.contains("+")) {
-                            totmp = totmp.split("\\+")[0].trim();
+                        newgit.fetch(repository);
+                    } catch (GitException ge) {
+                        // fetch fails when workspace is empty, run clone
+                        newgit.clone(repository);
+                    }
+
+                    if (type.equalsIgnoreCase(PARAMETER_TYPE_REVISION)) {
+                        revisionMap = new LinkedHashMap<String, String>();
+
+                        List<ObjectId> oid;
+
+                        if (branch != null && !branch.isEmpty()) {
+                            oid = newgit.revListBranch(branch);
                         } else {
-                            totmp = totmp.split("\\-")[0].trim();
+                            oid = newgit.revListAll();
                         }
 
-                        long timestamp = Long.parseLong(totmp, 10) * 1000;
-                        Date date = new Date();
-                        date.setTime(timestamp);
+                        for (ObjectId noid : oid) {
+                            Revision r = new Revision(noid);
+                            List<String> details = newgit.showRevision(r);
 
-                        goodDate = new SimpleDateFormat("yyyy-MM-dd hh:mm").format(date);
+                            String author = "";
 
-                    } catch (Exception e) {
-                        e.toString();
+                            for (String detail : details) {
+                                if (detail.startsWith("author")) {
+                                    author = detail;
+                                    break;
+                                }
+                            }
+
+                            String[] authorDate = author.split(">");
+                            String authorInfo = authorDate[0].replaceFirst("author ", "").replaceFirst("committer ", "") + ">";
+                            String goodDate = "";
+                            try {
+                                String totmp = authorDate[1].trim();
+                                if (totmp.contains("+")) {
+                                    totmp = totmp.split("\\+")[0].trim();
+                                } else {
+                                    totmp = totmp.split("\\-")[0].trim();
+                                }
+
+                                long timestamp = Long.parseLong(totmp, 10) * 1000;
+                                Date date = new Date();
+                                date.setTime(timestamp);
+
+                                goodDate = new SimpleDateFormat("yyyy-MM-dd hh:mm").format(date);
+
+                            } catch (Exception e) {
+                                e.toString();
+                            }
+                            revisionMap.put(r.getSha1String(), r.getSha1String() + " " + authorInfo + " " + goodDate);
+                        }
+                    } else if (type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {
+                        tagMap = new HashMap<String, String>();
+
+                        // Set<String> tagNameList = newgit.getTagNames("*");
+                        for (String tagName : newgit.getTagNames("*")) {
+                            tagMap.put(tagName, tagName);
+                        }
                     }
-                    revisionMap.put(r.getSha1String(), r.getSha1String() + " " + authorInfo + " " + goodDate);
+                    return true;
                 }
-            } else if (type.equalsIgnoreCase(PARAMETER_TYPE_TAG)) {
-                tagMap = new HashMap<String, String>();
-
-                // Set<String> tagNameList = newgit.getTagNames("*");
-                for (String tagName : newgit.getTagNames("*")) {
-                    tagMap.put(tagName, tagName);
-                }
-            }
-
-//			}
+            });
         }
     }
 
@@ -300,7 +307,7 @@ public class GitParameterDefinition extends ParameterDefinition implements
         return errorMessage;
     }
 
-    public Map<String, String> getRevisionMap() {
+    public Map<String, String> getRevisionMap() throws IOException, InterruptedException {
         //Fix get new commit's when new build is started  
 //		if (revisionMap == null || revisionMap.isEmpty()) {
         generateContents(PARAMETER_TYPE_REVISION);
@@ -308,7 +315,7 @@ public class GitParameterDefinition extends ParameterDefinition implements
         return revisionMap;
     }
 
-    public Map<String, String> getTagMap() {
+    public Map<String, String> getTagMap() throws IOException, InterruptedException {
         if (tagMap == null || tagMap.isEmpty()) {
             generateContents(PARAMETER_TYPE_TAG);
         }
