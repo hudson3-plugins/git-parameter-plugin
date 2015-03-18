@@ -9,7 +9,7 @@
     <groupId>org.hudsonci.plugins</groupId>
     <artifactId>git-parameter</artifactId>  
     <packaging>hpi</packaging>
-    <version>0.3-h-2-SNAPSHOT</version>
+    <version>0.3-h-2</version>
     <name>Git Parameter Plug-In</name>
     <url>http://wiki.hudson-ci.org/display/HUDSON/Build+Parameter+Plugin</url>
   
